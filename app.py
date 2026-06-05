@@ -35,7 +35,7 @@ DEFAULT_LAT = 45.753722
 DEFAULT_LON = 21.225712
 
 # ------------------------------------------------------------------------------
-# INIȚIALIZARE ȘI GESTIONARE FIȘIERE / BD
+# INIȚIALIZARE ȘI GESTIONARE FIȘIERE / BD (Cu mecanism de auto-vindecare schema)
 # ------------------------------------------------------------------------------
 def init_sqlite():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -69,13 +69,33 @@ def load_user_settings():
         },
         "commutes": []
     }
+    
     if not os.path.exists(SETTINGS_FILE):
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(default_settings, f, indent=4, ensure_ascii=False)
         return default_settings
+        
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            
+        # Asigură auto-vindecarea structurii JSON în cazul cheilor lipsă
+        if not isinstance(data, dict):
+            data = default_settings
+            
+        for key, val in default_settings.items():
+            if key not in data:
+                data[key] = val
+                
+        # Asigură validarea internă a sub-cheilor de localizare personală
+        if "personal_points" in data and isinstance(data["personal_points"], dict):
+            for p_key, p_val in default_settings["personal_points"].items():
+                if p_key not in data["personal_points"]:
+                    data["personal_points"][p_key] = p_val
+        else:
+            data["personal_points"] = default_settings["personal_points"]
+            
+        return data
     except Exception:
         return default_settings
 
@@ -105,19 +125,16 @@ def extract_stations_from_html(html):
     if not html or html.startswith("Error"):
         return None
     
-    # Caută array-ul javascript var items = [...]
     pattern = r"var\s+items\s*=\s*(\[.*?\]);"
     match = re.search(pattern, html, re.DOTALL)
     if not match:
         return None
     
     json_str = match.group(1)
-    # Curățare robustă pentru eventuale erori de sintaxă JS
     json_str = re.sub(r',(\s*[\]\}])', r'\1', json_str)
     try:
         return json.loads(json_str)
     except Exception:
-        # Fallback parser bazat pe regex dacă json.loads eșuează
         try:
             items_list = []
             block_pattern = r"\{[^{}]*\}"
@@ -133,7 +150,7 @@ def extract_stations_from_html(html):
             return None
 
 # ------------------------------------------------------------------------------
-# FUNCȚII EVALUARE SCORURI (Corectate pentru a utiliza coloanele redenumite)
+# EVALUARE SCORURI
 # ------------------------------------------------------------------------------
 def calculate_pickup_score(row):
     status = str(row["Status"]).strip()
@@ -189,7 +206,6 @@ def normalize_stations(raw_items):
         return pd.DataFrame()
     
     df = pd.DataFrame(raw_items)
-    # Standardizare coloane (Redenumirea are loc aici)
     df = df.rename(columns={
         "StationName": "Statie",
         "Address": "Adresa",
@@ -206,7 +222,6 @@ def normalize_stations(raw_items):
     df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
     df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
     
-    # Aplicare scoruri pe baza noilor coloane standardizate
     df["Scor preluare"] = df.apply(calculate_pickup_score, axis=1)
     df["Scor returnare"] = df.apply(calculate_return_score, axis=1)
     df["Culoare marker"] = df.apply(calculate_station_color, axis=1)
@@ -220,7 +235,7 @@ def normalize_stations(raw_items):
 # MATEMATICĂ GEOSPAȚIALĂ & ALGORITMI
 # ------------------------------------------------------------------------------
 def haversine_distance(lat1, lon1, lat2, lon2):
-    R = 6371000.0  # Rază pământ în metri
+    R = 6371000.0
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
@@ -246,7 +261,6 @@ def get_nearest_bike_stations(df, origin_lat, origin_lon, n=3):
     if valid_df.empty:
         return pd.DataFrame()
     valid_df["Distanță"] = valid_df.apply(lambda r: haversine_distance(origin_lat, origin_lon, r["lat"], r["lon"]), axis=1)
-    # Penalizare ușoară pentru stații cu o singură bicicletă
     valid_df["Scor sortare"] = valid_df["Distanță"] + valid_df["Biciclete disponibile"].apply(lambda b: 150 if b == 1 else 0)
     return valid_df.sort_values(by="Scor sortare").head(n)
 
@@ -255,7 +269,6 @@ def get_nearest_return_stations(df, origin_lat, origin_lon, n=3):
     if valid_df.empty:
         return pd.DataFrame()
     valid_df["Distanță"] = valid_df.apply(lambda r: haversine_distance(origin_lat, origin_lon, r["lat"], r["lon"]), axis=1)
-    # Penalizare ușoară pentru stații cu un singur loc gol
     valid_df["Scor sortare"] = valid_df["Distanță"] + valid_df["Locuri goale"].apply(lambda d: 150 if d == 1 else 0)
     return valid_df.sort_values(by="Scor sortare").head(n)
 
@@ -269,7 +282,6 @@ def save_snapshot_to_sqlite(df):
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     
-    # Verificare ultimul timestamp pentru a evita stocarea duplicată la refresh-uri excesive
     cursor.execute("SELECT MAX(timestamp) FROM station_snapshots")
     last_ts_res = cursor.fetchone()
     
@@ -281,7 +293,6 @@ def save_snapshot_to_sqlite(df):
             last_ts = dt_parser.parse(last_ts_res[0])
             elapsed_seconds = (datetime.now() - last_ts).total_seconds()
             
-            # Salvăm o dată la maxim 5 minute dacă datele sunt absolut identice
             if elapsed_seconds < 300:
                 cursor.execute("""
                     SELECT station_name, bikes_available, empty_doors, status 
@@ -338,7 +349,6 @@ def detect_station_changes(current_df, previous_df):
         if statie in prev_dict:
             prev = prev_dict[statie]
             
-            # 1. Schimbare status funcționalitate
             if curr["Status"] != prev["Status"]:
                 events.append({
                     "timestamp": datetime.now().strftime("%H:%M:%S"),
@@ -347,7 +357,6 @@ def detect_station_changes(current_df, previous_df):
                     "mesaj": f"Schimbare status: {prev['Status']} ➔ {curr['Status']}"
                 })
                 
-            # 2. Re-aprovizionare stație goală
             if prev["Biciclete disponibile"] == 0 and curr["Biciclete disponibile"] > 0:
                 events.append({
                     "timestamp": datetime.now().strftime("%H:%M:%S"),
@@ -356,7 +365,6 @@ def detect_station_changes(current_df, previous_df):
                     "mesaj": f"🚲 Au apărut biciclete: 0 ➔ {curr['Biciclete disponibile']} disponibile."
                 })
             
-            # 3. Stație complet golită
             if prev["Biciclete disponibile"] > 0 and curr["Biciclete disponibile"] == 0:
                 events.append({
                     "timestamp": datetime.now().strftime("%H:%M:%S"),
@@ -365,7 +373,6 @@ def detect_station_changes(current_df, previous_df):
                     "mesaj": f"⚠️ Stația s-a golit complet de biciclete."
                 })
 
-            # 4. Deblocare locuri de returnare
             if prev["Locuri goale"] == 0 and curr["Locuri goale"] > 0:
                 events.append({
                     "timestamp": datetime.now().strftime("%H:%M:%S"),
@@ -376,7 +383,7 @@ def detect_station_changes(current_df, previous_df):
     return events
 
 # ------------------------------------------------------------------------------
-# SERVICIU METEO GRATUIT (OPEN-METEO)
+# SERVICIU METEO GRATUIT
 # ------------------------------------------------------------------------------
 def fetch_weather_open_meteo(lat, lon):
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
@@ -398,7 +405,6 @@ def calculate_bike_weather_score(weather):
     
     score = 10
     
-    # Penalizări Temperatură
     if temp < 5:
         score -= 4
     elif temp < 12:
@@ -406,13 +412,11 @@ def calculate_bike_weather_score(weather):
     elif temp > 35:
         score -= 3
         
-    # Penalizări Vânt
     if wind > 30:
         score -= 4
     elif wind > 18:
         score -= 2
         
-    # Penalizări Cod Meteo WMO
     if code in [51, 53, 55, 80]:
         score -= 3
         verdict = "Ploaie ușoară"
@@ -459,7 +463,6 @@ def render_header(df, weather):
         online_st = df[df["Este online"]].shape[0]
         offline_st = df[~df["Este online"]].shape[0]
         
-        # Scorul meteo
         w_score, w_desc, w_icon = calculate_bike_weather_score(weather)
         
         col1, col2, col3, col4 = st.columns(4)
@@ -476,13 +479,11 @@ def render_header(df, weather):
 # HARTA INTERACTIVĂ (FOLIUM)
 # ------------------------------------------------------------------------------
 def render_map(df, user_location=None, personal_points=None, highlighted_stations=None, key_suffix=""):
-    # Centrare pe locația userului sau central implicit
     center_lat = user_location[0] if user_location else DEFAULT_LAT
     center_lon = user_location[1] if user_location else DEFAULT_LON
     
     m = folium.Map(location=[center_lat, center_lon], zoom_start=14, tiles="cartodbpositron")
     
-    # 1. Adăugare Marker Poziție Curentă Utilizator
     if user_location:
         folium.Marker(
             location=user_location,
@@ -490,7 +491,6 @@ def render_map(df, user_location=None, personal_points=None, highlighted_station
             icon=folium.Icon(color="blue", icon="user", prefix="fa")
         ).add_to(m)
         
-    # 2. Adăugare Puncte Personale (Acasă, Spital etc)
     if personal_points:
         for name, coords in personal_points.items():
             if coords:
@@ -500,7 +500,6 @@ def render_map(df, user_location=None, personal_points=None, highlighted_station
                     icon=folium.Icon(color="darkpurple", icon="home" if name == "ACASĂ" else "star", prefix="fa")
                 ).add_to(m)
 
-    # 3. Adăugare Stații VeloTM
     for _, row in df.iterrows():
         is_highlighted = False
         if highlighted_stations and row["Statie"] in highlighted_stations:
@@ -577,7 +576,6 @@ def main():
     df = normalize_stations(raw_items)
     save_snapshot_to_sqlite(df)
     
-    # Evaluare evenimente noi
     if not st.session_state.prev_df.empty:
         new_events = detect_station_changes(df, st.session_state.prev_df)
         if new_events:
@@ -585,7 +583,6 @@ def main():
             
     st.session_state.prev_df = df.copy()
 
-    # Încărcare Meteo dinamic pentru Timișoara
     weather_data = fetch_weather_open_meteo(DEFAULT_LAT, DEFAULT_LON)
     render_header(df, weather_data)
 
@@ -674,7 +671,7 @@ def main():
     # TAB 2: HARTĂ LIVE & TABEL DATE COMPLET
     with tab2:
         st.markdown("### 🗺️ Situația Stațiilor VeloTM în timp real")
-        render_map(df, user_location=st.session_state.user_coords, personal_points=settings["personal_points"], key_suffix="tab2")
+        render_map(df, user_location=st.session_state.user_coords, personal_points=settings.get("personal_points"), key_suffix="tab2")
         
         st.markdown("### 📋 Toate Stațiile din Rețea")
         filtru = st.selectbox("Filtrează stațiile după status și disponibilitate:", [
@@ -701,7 +698,7 @@ def main():
     # TAB 3: PLANIFICATOR TRASEU (POINT A -> POINT B)
     with tab3:
         st.markdown("### 🛣️ Planificare Traseu Smart VeloTM")
-        personal_names = [k for k, v in settings["personal_points"].items() if v is not None]
+        personal_names = [k for k, v in settings.get("personal_points", {}).items() if v is not None]
         point_opts = ["Locația mea curentă"] + personal_names + ["Hartă (Punct ales manual)"]
         
         col_pa, col_pb = st.columns(2)
@@ -719,7 +716,7 @@ def main():
             if picker_data and picker_data.get("last_clicked"):
                 coords_a = [picker_data["last_clicked"]["lat"], picker_data["last_clicked"]["lng"]]
         else:
-            coords_a = settings["personal_points"].get(src_opt)
+            coords_a = settings.get("personal_points", {}).get(src_opt)
             
         coords_b = None
         if dest_opt == "Locația mea curentă":
@@ -730,7 +727,7 @@ def main():
             if picker_data_b and picker_data_b.get("last_clicked"):
                 coords_b = [picker_data_b["last_clicked"]["lat"], picker_data_b["last_clicked"]["lng"]]
         else:
-            coords_b = settings["personal_points"].get(dest_opt)
+            coords_b = settings.get("personal_points", {}).get(dest_opt)
 
         if coords_a and coords_b:
             p_stations = get_nearest_bike_stations(df, coords_a[0], coords_a[1], n=1)
@@ -768,7 +765,7 @@ def main():
     with tab4:
         st.markdown("### ⭐ Administrare Puncte Personale & Favorite")
         st.subheader("📍 Setează un punct personal pe hartă")
-        selected_point_name = st.selectbox("Alege ce punct dorești să definești:", list(settings["personal_points"].keys()))
+        selected_point_name = st.selectbox("Alege ce punct dorești să definești:", list(settings.get("personal_points", {}).keys()))
         
         st.write("Oferiți click pe hartă în locația dorită pentru a salva coordonatele:")
         map_picker = render_map(df, key_suffix="point_saver")
@@ -778,6 +775,8 @@ def main():
             click_lon = map_picker["last_clicked"]["lng"]
             
             if st.button(f"Salvează coordonatele pentru {selected_point_name}"):
+                if "personal_points" not in settings:
+                    settings["personal_points"] = {}
                 settings["personal_points"][selected_point_name] = [click_lat, click_lon]
                 save_user_settings(settings)
                 st.success(f"Punctul '{selected_point_name}' a fost salvat: {click_lat:.6f}, {click_lon:.6f}")
