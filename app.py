@@ -87,7 +87,7 @@ init_sqlite()
 settings = load_user_settings()
 
 # ------------------------------------------------------------------------------
-# SCRAPER LIVRE VELOTM
+# SCRAPER LIVE VELOTM
 # ------------------------------------------------------------------------------
 @st.cache_data(ttl=60)
 def fetch_page(url):
@@ -117,7 +117,7 @@ def extract_stations_from_html(html):
     try:
         return json.loads(json_str)
     except Exception:
-        # Fallback parser bazat pe regex dacă json.loads eșuează din cauza altor elemente specifice JS
+        # Fallback parser bazat pe regex dacă json.loads eșuează
         try:
             items_list = []
             block_pattern = r"\{[^{}]*\}"
@@ -132,9 +132,16 @@ def extract_stations_from_html(html):
         except Exception:
             return None
 
+# ------------------------------------------------------------------------------
+# FUNCȚII EVALUARE SCORURI (Corectate pentru a utiliza coloanele redenumite)
+# ------------------------------------------------------------------------------
 def calculate_pickup_score(row):
     status = str(row["Status"]).strip()
-    bikes = int(row["OcuppiedSpots"])
+    try:
+        bikes = int(row["Biciclete disponibile"])
+    except (KeyError, ValueError, TypeError):
+        bikes = 0
+        
     if status == "Offline":
         return "Inutilă momentan"
     if bikes > 5:
@@ -147,7 +154,11 @@ def calculate_pickup_score(row):
 
 def calculate_return_score(row):
     status = str(row["Status"]).strip()
-    doors = int(row["EmptyDoors"])
+    try:
+        doors = int(row["Locuri goale"])
+    except (KeyError, ValueError, TypeError):
+        doors = 0
+        
     if status == "Offline":
         return "Inutilă momentan"
     if doors > 5:
@@ -160,7 +171,11 @@ def calculate_return_score(row):
 
 def calculate_station_color(row):
     status = str(row["Status"]).strip()
-    bikes = int(row["OcuppiedSpots"])
+    try:
+        bikes = int(row["Biciclete disponibile"])
+    except (KeyError, ValueError, TypeError):
+        bikes = 0
+        
     if status == "Offline":
         return "red"
     if bikes > 5:
@@ -174,8 +189,7 @@ def normalize_stations(raw_items):
         return pd.DataFrame()
     
     df = pd.DataFrame(raw_items)
-    # Standardizare coloane
-    # În sursa oficială "OcuppiedSpots" reprezintă biciclete disponibile și "EmptyDoors" porți goale
+    # Standardizare coloane (Redenumirea are loc aici)
     df = df.rename(columns={
         "StationName": "Statie",
         "Address": "Adresa",
@@ -192,7 +206,7 @@ def normalize_stations(raw_items):
     df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
     df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
     
-    # Adăugare scoruri și parametri calculați
+    # Aplicare scoruri pe baza noilor coloane standardizate
     df["Scor preluare"] = df.apply(calculate_pickup_score, axis=1)
     df["Scor returnare"] = df.apply(calculate_return_score, axis=1)
     df["Culoare marker"] = df.apply(calculate_station_color, axis=1)
@@ -232,7 +246,7 @@ def get_nearest_bike_stations(df, origin_lat, origin_lon, n=3):
     if valid_df.empty:
         return pd.DataFrame()
     valid_df["Distanță"] = valid_df.apply(lambda r: haversine_distance(origin_lat, origin_lon, r["lat"], r["lon"]), axis=1)
-    # Penalizare ușoară pentru stații cu 1 singură bicicletă (risc crescut) pentru a oferi recomandări sigure
+    # Penalizare ușoară pentru stații cu o singură bicicletă
     valid_df["Scor sortare"] = valid_df["Distanță"] + valid_df["Biciclete disponibile"].apply(lambda b: 150 if b == 1 else 0)
     return valid_df.sort_values(by="Scor sortare").head(n)
 
@@ -241,7 +255,7 @@ def get_nearest_return_stations(df, origin_lat, origin_lon, n=3):
     if valid_df.empty:
         return pd.DataFrame()
     valid_df["Distanță"] = valid_df.apply(lambda r: haversine_distance(origin_lat, origin_lon, r["lat"], r["lon"]), axis=1)
-    # Penalizare pentru stații cu locuri goale puține
+    # Penalizare ușoară pentru stații cu un singur loc gol
     valid_df["Scor sortare"] = valid_df["Distanță"] + valid_df["Locuri goale"].apply(lambda d: 150 if d == 1 else 0)
     return valid_df.sort_values(by="Scor sortare").head(n)
 
@@ -399,7 +413,6 @@ def calculate_bike_weather_score(weather):
         score -= 2
         
     # Penalizări Cod Meteo WMO
-    # 51-67: Ploaie, 71-77: Ninsoare, 80-82: Averse, 95-99: Furtuni
     if code in [51, 53, 55, 80]:
         score -= 3
         verdict = "Ploaie ușoară"
@@ -463,7 +476,7 @@ def render_header(df, weather):
 # HARTA INTERACTIVĂ (FOLIUM)
 # ------------------------------------------------------------------------------
 def render_map(df, user_location=None, personal_points=None, highlighted_stations=None, key_suffix=""):
-    # Centrare implicită pe centrul Timișoarei sau pe locația userului
+    # Centrare pe locația userului sau central implicit
     center_lat = user_location[0] if user_location else DEFAULT_LAT
     center_lon = user_location[1] if user_location else DEFAULT_LON
     
@@ -473,7 +486,7 @@ def render_map(df, user_location=None, personal_points=None, highlighted_station
     if user_location:
         folium.Marker(
             location=user_location,
-            popup="Locația ta detectată",
+            popup="Locația ta",
             icon=folium.Icon(color="blue", icon="user", prefix="fa")
         ).add_to(m)
         
@@ -513,7 +526,6 @@ def render_map(df, user_location=None, personal_points=None, highlighted_station
             icon=folium.Icon(color=color, icon="bicycle", prefix="fa")
         ).add_to(m)
 
-    # Afișare hartă și interceptare click-uri
     map_data = st_folium(m, width="100%", height=450, key=f"folium_map_{key_suffix}")
     return map_data
 
@@ -521,7 +533,6 @@ def render_map(df, user_location=None, personal_points=None, highlighted_station
 # FLUXUL LOGIC ȘI EXECUȚIA APLICAȚIEI
 # ------------------------------------------------------------------------------
 def main():
-    # Sincronizare starea sesiunii pentru evenimente
     if "events" not in st.session_state:
         st.session_state.events = []
     if "prev_df" not in st.session_state:
@@ -538,7 +549,6 @@ def main():
         value="http://www.velotm.ro/harta-statii-biciclete"
     )
     
-    # Opțiune Interval Actualizare Automată (Auto-refresh)
     refresh_opts = {
         "Oprit": None,
         "30 Secunde": 30000,
@@ -554,14 +564,12 @@ def main():
         
     st.sidebar.markdown("---")
     
-    # 1. Încărcare date Live
     with st.spinner("Se descarcă datele VeloTM live..."):
         html_content = fetch_page(source_url)
         raw_items = extract_stations_from_html(html_content)
         
     if not raw_items:
         st.error("Nu s-au putut extrage datele live de pe portalul VeloTM. Verificați conexiunea sau URL-ul din sidebar.")
-        # Fallback debug info
         with st.sidebar.expander("Vizualizare cod sursă parțial"):
             st.code(html_content[:1500] if html_content else "Niciun răspuns de la server.")
         return
@@ -573,7 +581,7 @@ def main():
     if not st.session_state.prev_df.empty:
         new_events = detect_station_changes(df, st.session_state.prev_df)
         if new_events:
-            st.session_state.events = (new_events + st.session_state.events)[:20] # Păstrăm ultimele 20
+            st.session_state.events = (new_events + st.session_state.events)[:20]
             
     st.session_state.prev_df = df.copy()
 
@@ -595,20 +603,20 @@ def main():
                         g_loc["coords"]["latitude"],
                         g_loc["coords"]["longitude"]
                     ]
-                    st.success("Locație geospațială detectată cu succes.")
+                    st.success("Locație geospațială detectată.")
                 else:
-                    st.warning("Nu s-a putut citi locația. Verificați setările de securitate și HTTPS.")
-            except Exception as e:
-                st.info("Browserul dumneavoastră necesită confirmarea permisiunii de localizare.")
+                    st.warning("Nu s-a putut citi locația. Verificați setările sau permisiunile.")
+            except Exception:
+                st.info("Sistemul de securitate al browserului solicită acceptul dumneavoastră.")
     
     with col_geo_2:
         if st.session_state.user_coords:
-            st.info(f"Poziție actuală salvată în sesiune: Lat {st.session_state.user_coords[0]:.5f}, Lon {st.session_state.user_coords[1]:.5f}")
+            st.info(f"Poziție curentă: Lat {st.session_state.user_coords[0]:.5f}, Lon {st.session_state.user_coords[1]:.5f}")
         else:
-            st.warning("Locația GPS nu este determinată momentan. Folosim fallback central.")
+            st.warning("Locația GPS nu este determinată. Se folosește centrul orașului.")
 
     # --------------------------------------------------------------------------
-    # TAB-URI NAVIGARE MOBILE-FIRST
+    # TAB-URI NAVIGARE
     # --------------------------------------------------------------------------
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📍 Ghid Rapid", 
@@ -619,13 +627,9 @@ def main():
         "🔔 Alerte Live"
     ])
 
-    # --------------------------------------------------------------------------
     # TAB 1: GHID RAPID
-    # --------------------------------------------------------------------------
     with tab1:
         st.markdown("### 🔍 Unde găsesc cea mai apropiată bicicletă?")
-        
-        # Centru de referință (Locație proprie sau Centrul orașului)
         ref_lat = st.session_state.user_coords[0] if st.session_state.user_coords else DEFAULT_LAT
         ref_lon = st.session_state.user_coords[1] if st.session_state.user_coords else DEFAULT_LON
         
@@ -667,16 +671,12 @@ def main():
             else:
                 st.write("Toate stațiile din apropiere sunt offline sau pline.")
 
-    # --------------------------------------------------------------------------
     # TAB 2: HARTĂ LIVE & TABEL DATE COMPLET
-    # --------------------------------------------------------------------------
     with tab2:
         st.markdown("### 🗺️ Situația Stațiilor VeloTM în timp real")
         render_map(df, user_location=st.session_state.user_coords, personal_points=settings["personal_points"], key_suffix="tab2")
         
         st.markdown("### 📋 Toate Stațiile din Rețea")
-        
-        # Filtru interactiv pentru tabelul de date complet
         filtru = st.selectbox("Filtrează stațiile după status și disponibilitate:", [
             "Toate", "Online", "Offline", "Cu biciclete disponibile", "Fără biciclete", "Cu locuri goale"
         ])
@@ -698,13 +698,9 @@ def main():
             use_container_width=True
         )
 
-    # --------------------------------------------------------------------------
     # TAB 3: PLANIFICATOR TRASEU (POINT A -> POINT B)
-    # --------------------------------------------------------------------------
     with tab3:
         st.markdown("### 🛣️ Planificare Traseu Smart VeloTM")
-        st.write("Aplicația va căuta cea mai apropiată stație de preluare de la Punctul A și cea mai apropiată stație de returnare de Punctul B.")
-        
         personal_names = [k for k, v in settings["personal_points"].items() if v is not None]
         point_opts = ["Locația mea curentă"] + personal_names + ["Hartă (Punct ales manual)"]
         
@@ -714,7 +710,6 @@ def main():
         with col_pb:
             dest_opt = st.selectbox("Destinație (Punct B)", point_opts, index=min(2, len(point_opts)-1))
             
-        # Rezolvare coordonate Punct A
         coords_a = None
         if src_opt == "Locația mea curentă":
             coords_a = st.session_state.user_coords
@@ -726,7 +721,6 @@ def main():
         else:
             coords_a = settings["personal_points"].get(src_opt)
             
-        # Rezolvare coordonate Punct B
         coords_b = None
         if dest_opt == "Locația mea curentă":
             coords_b = st.session_state.user_coords
@@ -739,7 +733,6 @@ def main():
             coords_b = settings["personal_points"].get(dest_opt)
 
         if coords_a and coords_b:
-            # Găsire cele mai bune stații intermediare
             p_stations = get_nearest_bike_stations(df, coords_a[0], coords_a[1], n=1)
             r_stations = get_nearest_return_stations(df, coords_b[0], coords_b[1], n=1)
             
@@ -756,11 +749,10 @@ def main():
                 st.write(f"🚲 **Pas 2 (Ciclism):** Luați bicicleta și pedalați până la stația **{r_station['Statie']}** (~{format_distance(dist_bike)}).")
                 st.write(f"🚶 **Pas 3 (Pietonal):** Returnați bicicleta și mergeți pe jos la destinație (~{format_distance(dist_walk_2)}).")
                 
-                # Verdict Utilizare
                 if dist_walk_1 > 900 or dist_walk_2 > 900:
-                    st.warning("⚠️ Verdict: **Riscant.** Stațiile sunt relativ departe de punctele dumneavoastră de interes pe jos.")
+                    st.warning("⚠️ Verdict: **Riscant.** Stațiile sunt destul de departe de punctele selectate.")
                 else:
-                    st.success("✅ Verdict: **Foarte recomandat.** Traseu accesibil și optimizat.")
+                    st.success("✅ Verdict: **Traseu Recomandat.** Accesibil și optim.")
                     
                 col_lnk1, col_lnk2 = st.columns(2)
                 with col_lnk1:
@@ -768,17 +760,13 @@ def main():
                 with col_lnk2:
                     st.markdown(f"[🚶 Navigație Pasul 3 pe Google Maps]({make_google_maps_walking_url(r_station['lat'], r_station['lon'], coords_b[0], coords_b[1])})")
             else:
-                st.error("Nu s-au putut identifica stații online în proximitatea coordonatelor furnizate.")
+                st.error("Nu s-au putut identifica stații online în proximitatea coordonatelor.")
         else:
             st.info("Alegeți originea și destinația pentru a genera planul de călătorie.")
 
-    # --------------------------------------------------------------------------
     # TAB 4: FAVORITE ȘI PUNCTE PERSONALE
-    # --------------------------------------------------------------------------
     with tab4:
         st.markdown("### ⭐ Administrare Puncte Personale & Favorite")
-        
-        # 1. Management Puncte Personale prin click pe hartă
         st.subheader("📍 Setează un punct personal pe hartă")
         selected_point_name = st.selectbox("Alege ce punct dorești să definești:", list(settings["personal_points"].keys()))
         
@@ -795,7 +783,6 @@ def main():
                 st.success(f"Punctul '{selected_point_name}' a fost salvat: {click_lat:.6f}, {click_lon:.6f}")
                 st.rerun()
 
-        # 2. Selectare Stații Favorite
         st.subheader("⭐ Selectare Stații VeloTM Favorite")
         favorite_list = st.multiselect(
             "Selectează stațiile tale preferate:",
@@ -805,32 +792,26 @@ def main():
         if st.button("Salvează lista de favorite"):
             settings["favorites"] = favorite_list
             save_user_settings(settings)
-            st.success("Lista de favorite actualizată cu succes.")
+            st.success("Lista de favorite actualizată.")
             
-        # Afișare rapidă Favorite în format compact
         if settings.get("favorites"):
             st.markdown("#### 🌟 Status Rapid Favorite:")
             fav_df = df[df["Statie"].isin(settings["favorites"])]
             for _, r in fav_df.iterrows():
                 st.markdown(f"- **{r['Statie']}**: 🚲 {r['Biciclete disponibile']} disp. | 🔓 {r['Locuri goale']} libere ({r['Status']})")
 
-    # --------------------------------------------------------------------------
     # TAB 5: ISTORIC & ANALIZĂ EVOLUȚIE
-    # --------------------------------------------------------------------------
     with tab5:
         st.markdown("### 📈 Evoluție Istorică Stații VeloTM")
         hist_df = load_history_from_sqlite()
         
         if not hist_df.empty:
-            st.write("Analiză pe baza datelor salvate în istoricul local SQLite.")
-            
             all_stations_list = sorted(hist_df["station_name"].unique())
             selected_chart_station = st.selectbox("Selectează stația pentru grafic:", all_stations_list)
             
             st_data = hist_df[hist_df["station_name"] == selected_chart_station].sort_values(by="timestamp")
             
             if not st_data.empty:
-                # Grafic evoluție Plotly
                 fig = px.line(
                     st_data, 
                     x="timestamp", 
@@ -841,7 +822,6 @@ def main():
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # Predicție simplă de disponibilitate
                 st_data["hour"] = st_data["timestamp"].dt.hour
                 hourly_avg = st_data.groupby("hour")["bikes_available"].mean()
                 current_hour = datetime.now().hour
@@ -850,26 +830,22 @@ def main():
                 if current_hour in hourly_avg.index:
                     avg_bikes = hourly_avg.loc[current_hour]
                     if avg_bikes < 1.5:
-                        st.warning(f"⚠️ **Risc crescut de lipsă biciclete:** La această oră ({current_hour}:00), în mod istoric stația are o medie de doar {avg_bikes:.1f} biciclete disponibile.")
+                        st.warning(f"⚠️ **Risc de lipsă biciclete:** La această oră ({current_hour}:00), istoric stația are o medie de doar {avg_bikes:.1f} biciclete disponibile.")
                     else:
-                        st.success(f"✅ **Probabilitate bună:** Istoric, la ora curentă ({current_hour}:00), stația are o medie stabilă de {avg_bikes:.1f} biciclete disponibile.")
+                        st.success(f"✅ **Probabilitate ridicată:** Istoric, la această oră ({current_hour}:00), stația are o medie de {avg_bikes:.1f} biciclete disponibile.")
             else:
-                st.info("Niciun istoric suficient înregistrat pentru această stație.")
+                st.info("Nu există date suficiente pentru această stație.")
         else:
-            st.info("Baza de date istorică este în curs de constituire. Istoricul va apărea după mai multe refresh-uri consecutive.")
+            st.info("Baza de date istorică este în curs de constituire. Istoricul va deveni disponibil pe măsură ce aplicația înregistrează date.")
 
-    # --------------------------------------------------------------------------
     # TAB 6: ALERTE LIVE (EVENIMENTE RECENTE)
-    # --------------------------------------------------------------------------
     with tab6:
         st.markdown("### 🔔 Jurnal Evenimente Recente VeloTM")
-        st.write("Evenimente identificate la nivel de rețea prin diferențierea automată a datelor curente față de ultimul snapshot salvat.")
-        
         if st.session_state.events:
             for ev in st.session_state.events:
                 st.markdown(f"**[{ev['timestamp']}] {ev['statie']}** - {ev['mesaj']}")
         else:
-            st.info("Nu s-au detectat modificări în rețea în cadrul acestei sesiuni.")
+            st.info("Nu s-au înregistrat modificări în rețea în această sesiune.")
 
 if __name__ == "__main__":
     main()
