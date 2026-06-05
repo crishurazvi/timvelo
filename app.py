@@ -35,7 +35,7 @@ DEFAULT_LAT = 45.753722
 DEFAULT_LON = 21.225712
 
 # ------------------------------------------------------------------------------
-# INIȚIALIZARE ȘI GESTIONARE FIȘIERE / BD (Cu mecanism de auto-vindecare schema)
+# INIȚIALIZARE ȘI GESTIONARE FIȘIERE / BD
 # ------------------------------------------------------------------------------
 def init_sqlite():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -79,7 +79,6 @@ def load_user_settings():
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             
-        # Asigură auto-vindecarea structurii JSON în cazul cheilor lipsă
         if not isinstance(data, dict):
             data = default_settings
             
@@ -87,7 +86,6 @@ def load_user_settings():
             if key not in data:
                 data[key] = val
                 
-        # Asigură validarea internă a sub-cheilor de localizare personală
         if "personal_points" in data and isinstance(data["personal_points"], dict):
             for p_key, p_val in default_settings["personal_points"].items():
                 if p_key not in data["personal_points"]:
@@ -538,6 +536,8 @@ def main():
         st.session_state.prev_df = pd.DataFrame()
     if "user_coords" not in st.session_state:
         st.session_state.user_coords = None
+    if "request_gps" not in st.session_state:
+        st.session_state.request_gps = False
 
     # --------------------------------------------------------------------------
     # SIDEBAR CONFIGURAȚIE
@@ -587,30 +587,42 @@ def main():
     render_header(df, weather_data)
 
     # --------------------------------------------------------------------------
-    # GEOLOCAȚIE BROWSER (Solicitare de la utilizator)
+    # GEOLOCAȚIE BROWSER (Implementare asincronă corectată)
     # --------------------------------------------------------------------------
     st.markdown("### 📍 Poziția ta curentă")
     col_geo_1, col_geo_2 = st.columns([1, 2])
-    with col_geo_1:
-        if st.button("🗺️ Permite accesul la locația mea", use_container_width=True):
-            try:
-                g_loc = get_geolocation()
-                if g_loc and "coords" in g_loc:
-                    st.session_state.user_coords = [
-                        g_loc["coords"]["latitude"],
-                        g_loc["coords"]["longitude"]
-                    ]
-                    st.success("Locație geospațială detectată.")
-                else:
-                    st.warning("Nu s-a putut citi locația. Verificați setările sau permisiunile.")
-            except Exception:
-                st.info("Sistemul de securitate al browserului solicită acceptul dumneavoastră.")
     
+    with col_geo_1:
+        if st.button("🗺️ Solicită acces la locația mea", use_container_width=True):
+            st.session_state.request_gps = True
+
+    # Evaluarea asincronă în afara butonului pentru a permite persistența datelor la rerun
+    if st.session_state.request_gps:
+        g_loc = get_geolocation()
+        if g_loc:
+            if "coords" in g_loc:
+                st.session_state.user_coords = [
+                    g_loc["coords"]["latitude"],
+                    g_loc["coords"]["longitude"]
+                ]
+                st.session_state.request_gps = False  # Oprim solicitarea după înregistrarea cu succes
+                st.success("Locație geospațială determinată și salvată.")
+                st.rerun()
+            else:
+                st.session_state.request_gps = False
+                st.warning("Nu s-au putut extrage coordonatele. Verificați permisiunile de localizare ale browserului.")
+        else:
+            st.info("Aștept răspuns de la browser... Vă rugăm să aprobați solicitarea de acces la locație în fereastra pop-up.")
+            st.caption("Notă: Geolocalizarea funcționează exclusiv prin conexiuni securizate (HTTPS) sau pe localhost.")
+
     with col_geo_2:
         if st.session_state.user_coords:
-            st.info(f"Poziție curentă: Lat {st.session_state.user_coords[0]:.5f}, Lon {st.session_state.user_coords[1]:.5f}")
+            st.info(f"Poziție curentă înregistrată: Lat {st.session_state.user_coords[0]:.5f}, Lon {st.session_state.user_coords[1]:.5f}")
+            if st.button("❌ Șterge locația curentă"):
+                st.session_state.user_coords = None
+                st.rerun()
         else:
-            st.warning("Locația GPS nu este determinată. Se folosește centrul orașului.")
+            st.warning("Locația GPS nu este determinată. Se folosește centrul orașului ca referință implicită.")
 
     # --------------------------------------------------------------------------
     # TAB-URI NAVIGARE
