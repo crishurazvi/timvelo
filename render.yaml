@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: velotm-radar-api
+    env: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: VELOTM_URL
+        value: http://www.velotm.ro/harta-statii-biciclete
+      - key: SCRAPE_INTERVAL_MINUTES
+        value: 10
+      - key: DB_PATH
+        value: history.sqlite
+  - type: static
+    name: velotm-radar-web
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        value: https://velotm-radar-api.onrender.com

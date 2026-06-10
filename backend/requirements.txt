@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+requests
+pandas
+beautifulsoup4
+pydantic
+python-dotenv
+apscheduler
+python-dateutil
